@@ -32,6 +32,29 @@ describes in *Building Winning Algorithmic Trading Systems*.
 
 All parameters are per-account and live in `config/accounts.yaml`.
 
+### Tuning for a $1,000 starting balance
+
+The defaults in `config/accounts.example.yaml` are set for **$1,000 USD**:
+
+| Param                  | Default | On $1,000        |
+|------------------------|---------|------------------|
+| `risk_per_trade_pct`   | 1.0     | ~$10 per trade   |
+| `max_open_positions`   | 3       | ~$30 total risk  |
+| `max_daily_loss_pct`   | 3.0     | ~$30 daily stop  |
+
+**Expect many instruments to be skipped.** With only ~$10 to risk, the
+position sizer (`risk_amount / stop_distance`) will fall below the instrument's
+minimum trade size for high-priced assets (XAU_USD, indices, BTC CFDs).
+Those skips are logged as `skipped_min_size` — you'll see FX majors and
+smaller-priced pairs trade regularly and high-priced assets stay flat.
+
+If you want more coverage, you can (in order of risk increase):
+1. Use a finer `granularity` (e.g. `M5`) so ATR — and thus the stop distance —
+   is smaller.
+2. Lower `atr_stop_mult` (e.g. 1.5).
+3. Whitelist only FX majors via the `instruments:` list.
+4. Raise `risk_per_trade_pct` cautiously (never beyond 2% on a $1k account).
+
 ---
 
 ## Project layout
@@ -55,6 +78,7 @@ oanda_bot/
 │   │   └── registry.py            # name -> class
 │   ├── risk/manager.py            # sizing + daily-loss kill switch
 │   ├── indicators/technical.py    # ATR, Donchian, EMA
+│   ├── notifications/telegram.py  # Telegram notifier (order_filled, etc.)
 │   └── utils/logger.py            # structured JSON logs
 └── tests/
     └── test_strategy.py
@@ -196,13 +220,79 @@ by `strategy.name` in the YAML. The `Strategy` base class in
 
 ---
 
-## 5. Operations
+## 5. Telegram notifications
 
-**Logs** are JSON, one event per line — pipe straight into Loki/Elastic:
+The bot posts a Telegram message every time a new trade is opened
+(`order_filled` event). Setup:
+
+1. **Create a bot**: talk to [@BotFather](https://t.me/BotFather) in Telegram,
+   run `/newbot`, answer the prompts, and save the token it returns (looks
+   like `123456789:AAH...`).
+2. **Get your chat ID**: start a chat with your new bot (send `/start`), then
+   open `https://api.telegram.org/bot<TOKEN>/getUpdates` in a browser. The
+   `chat.id` field in the JSON response is what you want. For a group, add
+   the bot to the group and read `chat.id` from the same endpoint (group IDs
+   are negative).
+3. **Fill `config/accounts.yaml`** under the account (or under `defaults:`):
+
+   ```yaml
+   notifications:
+     telegram:
+       enabled: true
+       bot_token: "123456789:AAH..."
+       chat_id:   "987654321"
+       notify_on:
+         - order_filled       # every new trade
+         # - startup          # also message when a worker starts
+   ```
+
+4. Restart: `docker compose restart`. You should see a message like:
+
+   ```
+   🟢 New LONG on EUR_USD
+   • Account: demo-primary
+   • Units: 1950
+   • Entry: 1.08425
+   • Stop: 1.07912
+   • Target: 1.09452
+   • Reason: breakout_high
+   • Equity: 1002.37 (risk ≈ 10.02)
+   ```
+
+Different accounts can notify different chats — override the `notifications`
+block inside a specific account entry.
+
+---
+
+## 6. Operations
+
+**Logs** are JSON, one event per line. Each tick you'll see:
+
+| Event            | Meaning                                                    |
+|------------------|------------------------------------------------------------|
+| `tick`           | Once per poll: equity, open positions, kill-switch state.  |
+| `evaluation`     | Per instrument: price, ATR, ATR%, donchian_high/low, signal, reason. |
+| `skipped_min_size` | Strategy fired but units < instrument minimum (common on $1k). |
+| `order_filled`   | A market order was accepted by OANDA.                      |
+| `time_exit`      | A trade was flattened by the time-exit rule.               |
+
+Examples:
 
 ```bash
+# Watch new orders only
 docker compose logs --no-log-prefix oanda-bot | jq 'select(.event=="order_filled")'
+
+# See the numbers the bot is evaluating for EUR_USD
+docker compose logs --no-log-prefix oanda-bot \
+  | jq 'select(.event=="evaluation" and .instrument=="EUR_USD")'
+
+# See everything that got blocked by volatility filter
+docker compose logs --no-log-prefix oanda-bot \
+  | jq 'select(.reason=="low_volatility") | {instrument, atr_pct, vol_filter}'
 ```
+
+To silence per-instrument evaluation lines, set `log_evaluations: false` on
+the account (or defaults).
 
 **Graceful shutdown**: `docker compose stop` sends SIGTERM; the bot finishes
 its current tick (≤ `tick_interval_seconds`) and exits. Attached SL/TP keeps
@@ -216,7 +306,7 @@ in `docker-compose.yml` if you run a lot of accounts.
 
 ---
 
-## 6. Davey-style deployment checklist
+## 7. Davey-style deployment checklist
 
 Do **not** skip steps. From *Building Winning Algorithmic Trading Systems*:
 
@@ -236,7 +326,7 @@ pandas and drop-in compatible.
 
 ---
 
-## 7. Security notes
+## 8. Security notes
 
 - `config/accounts.yaml` is in `.gitignore`. Never commit your tokens.
 - Use a different token per account; scope each to the specific account ID.
@@ -245,7 +335,7 @@ pandas and drop-in compatible.
 
 ---
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 | Symptom | Likely cause |
 |---|---|
@@ -254,3 +344,5 @@ pandas and drop-in compatible.
 | No trades ever | `trading_window_utc` too narrow, `volatility_filter_atr_pct` too high, or `lookback_bars` too long relative to `count`. |
 | `order_failed` with units=0 | Stop distance is zero or below instrument minimum trade size. |
 | `daily_loss_limit_hit` | Intended kill-switch; resets automatically at 00:00 UTC. |
+| `telegram_send_failed` | Wrong bot token, wrong chat ID, or bot blocked in the chat. |
+| Many `skipped_min_size` events | Normal on a $1k account for high-priced assets; see "Tuning for a $1,000 starting balance" above. |

@@ -33,6 +33,17 @@ class StrategyConfig(BaseModel):
     params: StrategyParams = Field(default_factory=StrategyParams)
 
 
+class TelegramConfig(BaseModel):
+    enabled: bool = False
+    bot_token: str = ""
+    chat_id: str = ""
+    notify_on: list[str] = Field(default_factory=lambda: ["order_filled"])
+
+
+class NotificationsConfig(BaseModel):
+    telegram: TelegramConfig = Field(default_factory=TelegramConfig)
+
+
 class AccountConfig(BaseModel):
     name: str
     account_id: str
@@ -42,6 +53,9 @@ class AccountConfig(BaseModel):
     tick_interval_seconds: int = 30
     instruments: Any = "ALL_TRADEABLE"
     excluded_instruments: list[str] = Field(default_factory=list)
+    initial_capital_usd: float = 1000.0
+    log_evaluations: bool = True
+    notifications: NotificationsConfig = Field(default_factory=NotificationsConfig)
     strategy: StrategyConfig = Field(default_factory=StrategyConfig)
 
     @field_validator("environment")

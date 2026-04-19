@@ -70,34 +70,54 @@ class KevinDaveyBreakout(Strategy):
 
         last = closed.iloc[-1]
         last_ts: pd.Timestamp = closed.index[-1]  # type: ignore[assignment]
-
-        if not self._in_trading_window(last_ts):
-            return Signal(SignalType.NONE, reason="outside_trading_window")
-
-        _atr = atr(closed, self.atr_period).iloc[-1]
-        if pd.isna(_atr) or _atr <= 0:
-            return Signal(SignalType.NONE, reason="no_atr")
-
         price = float(last["close"])
-        if price <= 0 or (_atr / price) < self.vol_filter:
-            return Signal(SignalType.NONE, reason="low_volatility")
 
+        _atr_series = atr(closed, self.atr_period)
+        _atr = float(_atr_series.iloc[-1]) if not _atr_series.empty else float("nan")
         d_high = donchian_high(closed, self.lookback).iloc[-1]
         d_low = donchian_low(closed, self.lookback).iloc[-1]
-        if pd.isna(d_high) or pd.isna(d_low):
-            return Signal(SignalType.NONE, reason="warmup")
+        d_high_f = float(d_high) if not pd.isna(d_high) else float("nan")
+        d_low_f = float(d_low) if not pd.isna(d_low) else float("nan")
+        atr_pct = (_atr / price) if (price > 0 and not pd.isna(_atr)) else float("nan")
 
-        if price > d_high:
+        details = {
+            "price": round(price, 6),
+            "atr": round(_atr, 6) if not pd.isna(_atr) else None,
+            "atr_pct": round(atr_pct, 6) if not pd.isna(atr_pct) else None,
+            "donchian_high": round(d_high_f, 6) if not pd.isna(d_high_f) else None,
+            "donchian_low": round(d_low_f, 6) if not pd.isna(d_low_f) else None,
+            "vol_filter": self.vol_filter,
+            "lookback": self.lookback,
+            "bar_time": last_ts.isoformat() if hasattr(last_ts, "isoformat") else str(last_ts),
+        }
+
+        if not self._in_trading_window(last_ts):
+            return Signal(SignalType.NONE, reason="outside_trading_window", details=details)
+
+        if pd.isna(_atr) or _atr <= 0:
+            return Signal(SignalType.NONE, reason="no_atr", details=details)
+
+        if price <= 0 or atr_pct < self.vol_filter:
+            return Signal(SignalType.NONE, reason="low_volatility", details=details)
+
+        if pd.isna(d_high_f) or pd.isna(d_low_f):
+            return Signal(SignalType.NONE, reason="warmup", details=details)
+
+        if price > d_high_f:
             stop = price - self.stop_mult * _atr
             target = price + self.target_mult * _atr
-            return Signal(SignalType.LONG, price, stop, target, "breakout_high")
+            details["stop"] = round(stop, 6)
+            details["target"] = round(target, 6)
+            return Signal(SignalType.LONG, price, stop, target, "breakout_high", details)
 
-        if price < d_low:
+        if price < d_low_f:
             stop = price + self.stop_mult * _atr
             target = price - self.target_mult * _atr
-            return Signal(SignalType.SHORT, price, stop, target, "breakout_low")
+            details["stop"] = round(stop, 6)
+            details["target"] = round(target, 6)
+            return Signal(SignalType.SHORT, price, stop, target, "breakout_low", details)
 
-        return Signal(SignalType.NONE, reason="no_breakout")
+        return Signal(SignalType.NONE, reason="no_breakout", details=details)
 
     def _in_trading_window(self, ts: pd.Timestamp) -> bool:
         t = ts.tz_convert("UTC").time() if ts.tzinfo else ts.time()

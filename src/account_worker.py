@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 import structlog
 
 from .config import AccountConfig
+from .notifications import TelegramNotifier
 from .oanda_client import OandaClient
 from .risk.manager import DailyLossTracker, compute_position_units
 from .strategy import Signal, SignalType, build_strategy
@@ -49,6 +50,13 @@ class AccountWorker:
         loss_tracker = DailyLossTracker(
             max_daily_loss_pct=self.cfg.strategy.params.max_daily_loss_pct
         )
+        tg = self.cfg.notifications.telegram
+        notifier = TelegramNotifier(
+            bot_token=tg.bot_token,
+            chat_id=tg.chat_id,
+            enabled=tg.enabled,
+            notify_on=tg.notify_on,
+        )
 
         instruments = await self._resolve_instruments(client)
         instrument_meta = {i["name"]: i for i in await client.tradeable_instruments()}
@@ -60,20 +68,35 @@ class AccountWorker:
             instruments=len(instruments),
             strategy=self.cfg.strategy.name,
             granularity=self.cfg.granularity,
+            initial_capital_usd=self.cfg.initial_capital_usd,
+            risk_per_trade_pct=self.cfg.strategy.params.risk_per_trade_pct,
+            telegram_enabled=notifier.enabled,
         )
 
-        while not self._stop.is_set():
-            try:
-                await self._tick(client, strategy, loss_tracker, instruments, instrument_meta, tracked, logger)
-            except Exception:
-                logger.exception("tick_failed")
+        try:
+            while not self._stop.is_set():
+                try:
+                    await self._tick(
+                        client,
+                        strategy,
+                        loss_tracker,
+                        instruments,
+                        instrument_meta,
+                        tracked,
+                        notifier,
+                        logger,
+                    )
+                except Exception:
+                    logger.exception("tick_failed")
 
-            try:
-                await asyncio.wait_for(
-                    self._stop.wait(), timeout=self.cfg.tick_interval_seconds
-                )
-            except asyncio.TimeoutError:
-                pass
+                try:
+                    await asyncio.wait_for(
+                        self._stop.wait(), timeout=self.cfg.tick_interval_seconds
+                    )
+                except asyncio.TimeoutError:
+                    pass
+        finally:
+            await notifier.close()
 
         logger.info("worker_stopped")
 
@@ -93,6 +116,7 @@ class AccountWorker:
         instruments: list[str],
         instrument_meta: dict[str, dict],
         tracked: dict[str, _TradeMeta],
+        notifier: TelegramNotifier,
         logger: structlog.stdlib.BoundLogger,
     ) -> None:
         summary = await client.account_summary()
@@ -107,6 +131,15 @@ class AccountWorker:
             if inst not in open_by_instrument:
                 tracked.pop(inst, None)
 
+        logger.info(
+            "tick",
+            equity=round(equity, 2),
+            currency=currency,
+            open_positions=len(open_by_instrument),
+            max_open=self.cfg.strategy.params.max_open_positions,
+            daily_blocked=loss_tracker.trading_blocked,
+        )
+
         # time-based exit
         await self._apply_time_exits(client, strategy, open_by_instrument, tracked, logger)
 
@@ -119,6 +152,8 @@ class AccountWorker:
             return
 
         required = strategy.required_bars()
+        risk_pct = self.cfg.strategy.params.risk_per_trade_pct
+
         for instrument in instruments:
             if self._stop.is_set():
                 break
@@ -139,6 +174,16 @@ class AccountWorker:
                 continue
 
             signal: Signal = strategy.evaluate(df)
+
+            if self.cfg.log_evaluations:
+                logger.info(
+                    "evaluation",
+                    instrument=instrument,
+                    signal=signal.type.value,
+                    reason=signal.reason,
+                    **signal.details,
+                )
+
             if signal.type in (SignalType.NONE, SignalType.CLOSE):
                 continue
 
@@ -148,13 +193,22 @@ class AccountWorker:
 
             units = compute_position_units(
                 equity=equity,
-                risk_pct=self.cfg.strategy.params.risk_per_trade_pct,
+                risk_pct=risk_pct,
                 entry_price=signal.entry_price or 0.0,
                 stop_price=signal.stop_price or 0.0,
                 instrument=meta,
                 account_currency=currency,
             )
             if units == 0:
+                logger.info(
+                    "skipped_min_size",
+                    instrument=instrument,
+                    reason="units_below_minimum",
+                    risk_amount=round(equity * risk_pct / 100.0, 2),
+                    stop_distance=abs(
+                        (signal.entry_price or 0.0) - (signal.stop_price or 0.0)
+                    ),
+                )
                 continue
             if signal.type == SignalType.SHORT and units > 0:
                 units = -units
@@ -186,6 +240,19 @@ class AccountWorker:
                     stop=signal.stop_price,
                     target=signal.target_price,
                     reason=signal.reason,
+                    trade_id=trade_id,
+                )
+                await notifier.notify_order_filled(
+                    account=self.cfg.name,
+                    instrument=instrument,
+                    side=signal.type.value,
+                    units=units,
+                    entry=signal.entry_price,
+                    stop=signal.stop_price,
+                    target=signal.target_price,
+                    reason=signal.reason,
+                    equity=equity,
+                    risk_pct=risk_pct,
                 )
             except Exception:
                 logger.exception("order_failed", instrument=instrument, units=units)

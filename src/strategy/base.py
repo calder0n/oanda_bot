@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 
 import pandas as pd
@@ -22,6 +22,7 @@ class Signal:
     stop_price: float | None = None
     target_price: float | None = None
     reason: str = ""
+    details: dict = field(default_factory=dict)
 
 
 class Strategy(ABC):
