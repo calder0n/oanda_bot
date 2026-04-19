@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class TradingWindow(BaseModel):
@@ -16,16 +16,30 @@ class TradingWindow(BaseModel):
 
 
 class StrategyParams(BaseModel):
+    # Freeform: each strategy consumes what it needs. Unknown keys are
+    # forwarded to the strategy constructor (which ignores the rest via **_).
+    model_config = ConfigDict(extra="allow")
+
+    # Runtime/risk params consumed by the worker itself.
+    time_exit_bars: int = 0
+    risk_per_trade_pct: float = 1.0
+    max_open_positions: int = 3
+    max_daily_loss_pct: float = 3.0
+    trading_window_utc: TradingWindow = Field(default_factory=TradingWindow)
+
+    # Kevin Davey defaults (ignored by other strategies).
     lookback_bars: int = 40
     atr_period: int = 14
     atr_stop_mult: float = 2.0
     atr_target_mult: float = 4.0
     volatility_filter_atr_pct: float = 0.0003
-    time_exit_bars: int = 48
-    risk_per_trade_pct: float = 0.5
-    max_open_positions: int = 5
-    max_daily_loss_pct: float = 2.0
-    trading_window_utc: TradingWindow = Field(default_factory=TradingWindow)
+
+    # Scalping ADX+RSI defaults (ignored by other strategies).
+    adx_period: int = 14
+    rsi_period: int = 14
+    adx_min: float = 23.0
+    rsi_oversold: float = 35.0
+    rsi_overbought: float = 65.0
 
 
 class StrategyConfig(BaseModel):

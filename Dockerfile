@@ -23,6 +23,7 @@ RUN groupadd -r bot && useradd -r -g bot bot \
 USER bot
 
 ENV CONFIG_PATH=/app/config/accounts.yaml \
+    STATE_DIR=/app/state \
     PYTHONPATH=/app
 
 ENTRYPOINT ["/usr/bin/tini", "--"]

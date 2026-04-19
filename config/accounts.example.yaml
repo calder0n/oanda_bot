@@ -1,68 +1,81 @@
-# Multi-account configuration.
+# Multi-account configuration for the scalping bot.
 # Duplicate a block to add another OANDA account. Everything under `strategy`
-# can be overridden per account. Tokens here MUST be demo (practice) tokens
-# until the strategy has been incubated - see README.
+# (and any other field) can be overridden per account. Tokens here MUST be
+# demo (practice) tokens.
 #
-# Defaults below are tuned for a $1,000 USD starting balance:
-#   - 1% risk per trade = ~$10 risked
-#   - max 3 concurrent positions so total at-risk capital stays around $30
+# Defaults below are tuned for a $1,000 USD starting balance on 1-minute
+# ADX+RSI scalping:
+#   - 1% risk per trade = ~$10 risked per entry
+#   - max 3 concurrent positions
 #   - hard daily-loss kill switch at 3% = ~$30
-#   - FX majors + metals + some indices (many instruments are filtered out
-#     automatically because their min trade size * stop distance exceeds $10)
+#   - every practice-tradeable instrument is evaluated
 
 defaults:
-  environment: practice           # practice | live
-  granularity: M15                # candle size (M1, M5, M15, H1, etc.)
-  tick_interval_seconds: 30       # how often each worker polls OANDA
-  instruments: "ALL_TRADEABLE"    # "ALL_TRADEABLE" or explicit list below
-  excluded_instruments: []        # e.g. ["XAU_XAG", "USB10Y_USD"]
-  initial_capital_usd: 1000       # reference only; sizing uses live NAV
+  environment: practice           # practice | live  (keep practice)
+  granularity: M1                 # 1-minute candles
+  tick_interval_seconds: 20       # how often each worker polls OANDA
+  instruments: "ALL_TRADEABLE"    # evaluate every demo-tradeable instrument
+  excluded_instruments: []
+  initial_capital_usd: 1000       # reference; sizing uses live NAV
   log_evaluations: true           # emit per-instrument numbers each tick
   notifications:
     telegram:
       enabled: false              # set to true after filling bot_token + chat_id
       bot_token: "PUT_TELEGRAM_BOT_TOKEN_HERE"
       chat_id:   "PUT_TELEGRAM_CHAT_ID_HERE"
-      notify_on:                  # events that trigger a message
+      notify_on:
         - order_filled
   strategy:
-    name: kevin_davey_breakout
+    name: scalping_adx_rsi
     params:
-      lookback_bars: 40           # Donchian-style breakout window
+      adx_period: 14
+      rsi_period: 14
       atr_period: 14
-      atr_stop_mult: 2.0          # initial stop = N * ATR
-      atr_target_mult: 4.0        # profit target = N * ATR (2:1 R)
-      volatility_filter_atr_pct: 0.0003  # min ATR / price ratio to trade
-      time_exit_bars: 48          # flat by this many bars if no stop/target
-      risk_per_trade_pct: 1.0     # % of equity risked per trade ($10 on $1k)
-      max_open_positions: 3       # cap concurrent risk at ~3% equity
-      max_daily_loss_pct: 3.0     # hard kill-switch per UTC day
-      trading_window_utc:         # restrict trading hours (UTC)
-        start: "06:00"
-        end:   "20:00"
+      adx_min: 23.0               # long/short only when ADX >= this
+      rsi_oversold: 35.0          # BUY when RSI <= this AND ADX ok
+      rsi_overbought: 65.0        # SELL when RSI >= this AND ADX ok
+      atr_stop_mult: 1.5          # SL distance = N * ATR
+      atr_target_mult: 1.5        # TP distance = N * ATR (1:1 R on scalps)
+      time_exit_bars: 0           # 0 = disable time-exit; SL/TP will flatten
+      risk_per_trade_pct: 1.0     # ~$10 risk on a $1k account
+      max_open_positions: 3
+      max_daily_loss_pct: 3.0
+      trading_window_utc:
+        start: "00:00"
+        end:   "23:59"
 
 accounts:
   - name: demo-primary
     account_id: "101-001-0000000-001"
     access_token: "PUT_YOUR_DEMO_TOKEN_HERE"
-    # any field below overrides defaults
-    # instruments:
-    #   - EUR_USD
-    #   - USD_JPY
-    #   - XAU_USD
+    # Per-account overrides go here, e.g.:
+    # notifications:
+    #   telegram:
+    #     enabled: true
+    #     bot_token: "123456789:AAH..."
+    #     chat_id:   "987654321"
     # strategy:
     #   params:
-    #     risk_per_trade_pct: 0.5
+    #     adx_min: 25.0
+    #     rsi_oversold: 30.0
+    #     rsi_overbought: 70.0
 
   # - name: demo-secondary
   #   account_id: "101-001-0000000-002"
   #   access_token: "ANOTHER_DEMO_TOKEN"
-  #   notifications:
-  #     telegram:
-  #       enabled: true
-  #       bot_token: "..."
-  #       chat_id:   "..."
+  #   instruments:
+  #     - EUR_USD
+  #     - USD_JPY
+  #     - GBP_USD
+
+  # - name: demo-kevin-davey
+  #   account_id: "101-001-0000000-003"
+  #   access_token: "ANOTHER_DEMO_TOKEN"
+  #   granularity: M15
   #   strategy:
+  #     name: kevin_davey_breakout
   #     params:
-  #       lookback_bars: 20
-  #       atr_stop_mult: 1.5
+  #       lookback_bars: 40
+  #       atr_stop_mult: 2.0
+  #       atr_target_mult: 4.0
+  #       risk_per_trade_pct: 1.0

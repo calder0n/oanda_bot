@@ -3,9 +3,11 @@ from __future__ import annotations
 
 from .base import Strategy
 from .kevin_davey import KevinDaveyBreakout
+from .scalping_adx_rsi import ScalpingAdxRsi
 
 _REGISTRY: dict[str, type[Strategy]] = {
     KevinDaveyBreakout.name: KevinDaveyBreakout,
+    ScalpingAdxRsi.name: ScalpingAdxRsi,
 }
 
 

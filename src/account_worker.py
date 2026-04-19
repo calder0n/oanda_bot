@@ -7,8 +7,10 @@ against that account's credentials.
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 
 import structlog
 
@@ -17,6 +19,7 @@ from .notifications import TelegramNotifier
 from .oanda_client import OandaClient
 from .risk.manager import DailyLossTracker, compute_position_units
 from .strategy import Signal, SignalType, build_strategy
+from .trade_registry import TradeRegistry
 from .utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -58,6 +61,12 @@ class AccountWorker:
             notify_on=tg.notify_on,
         )
 
+        state_dir = Path(os.environ.get("STATE_DIR", "/app/state"))
+        registry = TradeRegistry(
+            account=self.cfg.name,
+            path=state_dir / f"trades_{self.cfg.name}.json",
+        )
+
         instruments = await self._resolve_instruments(client)
         instrument_meta = {i["name"]: i for i in await client.tradeable_instruments()}
         tracked: dict[str, _TradeMeta] = {}
@@ -84,6 +93,7 @@ class AccountWorker:
                         instrument_meta,
                         tracked,
                         notifier,
+                        registry,
                         logger,
                     )
                 except Exception:
@@ -117,6 +127,7 @@ class AccountWorker:
         instrument_meta: dict[str, dict],
         tracked: dict[str, _TradeMeta],
         notifier: TelegramNotifier,
+        registry: TradeRegistry,
         logger: structlog.stdlib.BoundLogger,
     ) -> None:
         summary = await client.account_summary()
@@ -215,16 +226,22 @@ class AccountWorker:
             if signal.type == SignalType.LONG and units < 0:
                 units = -units
 
+            client_tag = (
+                f"{self.cfg.name}:{strategy.name}:"
+                f"{int(datetime.now(timezone.utc).timestamp() * 1000)}"
+            )
             try:
                 resp = await client.market_order(
                     instrument=instrument,
                     units=units,
                     stop_loss_price=signal.stop_price,
                     take_profit_price=signal.target_price,
-                    client_tag=f"{self.cfg.name}:{strategy.name}",
+                    client_tag=client_tag,
                 )
                 fill = resp.get("orderFillTransaction") or {}
                 trade_id = str(fill.get("tradeOpened", {}).get("tradeID", ""))
+                fill_price = fill.get("price")
+                entry_price = float(fill_price) if fill_price else signal.entry_price
                 if trade_id:
                     tracked[instrument] = _TradeMeta(
                         trade_id=trade_id,
@@ -232,27 +249,42 @@ class AccountWorker:
                         opened_at=datetime.now(timezone.utc),
                     )
                     open_by_instrument[instrument] = {"instrument": instrument, "id": trade_id}
+                    await registry.record_open(
+                        trade_id=trade_id,
+                        instrument=instrument,
+                        side=signal.type.value,
+                        units=units,
+                        entry_price=entry_price,
+                        stop_loss=signal.stop_price,
+                        take_profit=signal.target_price,
+                        reason=signal.reason,
+                        strategy=strategy.name,
+                        client_tag=client_tag,
+                        indicators=signal.details,
+                    )
                 logger.info(
                     "order_filled",
                     instrument=instrument,
                     units=units,
-                    entry=signal.entry_price,
+                    entry=entry_price,
                     stop=signal.stop_price,
                     target=signal.target_price,
                     reason=signal.reason,
                     trade_id=trade_id,
+                    client_tag=client_tag,
                 )
                 await notifier.notify_order_filled(
                     account=self.cfg.name,
                     instrument=instrument,
                     side=signal.type.value,
                     units=units,
-                    entry=signal.entry_price,
+                    entry=entry_price,
                     stop=signal.stop_price,
                     target=signal.target_price,
                     reason=signal.reason,
                     equity=equity,
                     risk_pct=risk_pct,
+                    trade_id=trade_id,
                 )
             except Exception:
                 logger.exception("order_failed", instrument=instrument, units=units)

@@ -71,22 +71,27 @@ class TelegramNotifier:
         reason: str,
         equity: float,
         risk_pct: float,
+        trade_id: str | None = None,
     ) -> None:
         if not self.should_notify("order_filled"):
             return
         risk_amount = equity * (risk_pct / 100.0) if equity > 0 else 0.0
         emoji = "🟢" if side == "LONG" else "🔴"
-        text = (
-            f"{emoji} *New {side}* on `{instrument}`\n"
-            f"• Account: `{account}`\n"
-            f"• Units: `{units}`\n"
-            f"• Entry: `{entry}`\n"
-            f"• Stop: `{stop}`\n"
-            f"• Target: `{target}`\n"
-            f"• Reason: `{reason}`\n"
-            f"• Equity: `{equity:.2f}` (risk ≈ `{risk_amount:.2f}`)"
-        )
-        await self.send(text)
+        lines = [
+            f"{emoji} *New {side}* on `{instrument}`",
+            f"• Account: `{account}`",
+        ]
+        if trade_id:
+            lines.append(f"• Trade ID: `{trade_id}`")
+        lines += [
+            f"• Units: `{units}`",
+            f"• Entry: `{entry}`",
+            f"• Stop: `{stop}`",
+            f"• Target: `{target}`",
+            f"• Reason: `{reason}`",
+            f"• Equity: `{equity:.2f}` (risk ≈ `{risk_amount:.2f}`)",
+        ]
+        await self.send("\n".join(lines))
 
     async def notify_startup(self, account: str, equity: float, instruments: int) -> None:
         if not self.should_notify("startup"):
