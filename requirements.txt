@@ -1,0 +1,10 @@
+oandapyV20==0.7.2
+pandas==2.2.3
+numpy==2.1.3
+PyYAML==6.0.2
+python-dotenv==1.0.1
+pydantic==2.9.2
+tenacity==9.0.0
+aiohttp==3.10.10
+uvloop==0.21.0; sys_platform != 'win32'
+structlog==24.4.0

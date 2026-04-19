@@ -1,0 +1,47 @@
+# Multi-account configuration.
+# Duplicate a block to add another OANDA account. Everything under `strategy`
+# can be overridden per account. Tokens here MUST be demo (practice) tokens
+# until the strategy has been incubated - see README.
+
+defaults:
+  environment: practice           # practice | live
+  granularity: M15                # candle size (M1, M5, M15, H1, etc.)
+  tick_interval_seconds: 30       # how often each worker polls OANDA
+  instruments: "ALL_TRADEABLE"    # "ALL_TRADEABLE" or explicit list below
+  excluded_instruments: []        # e.g. ["XAU_XAG", "USB10Y_USD"]
+  strategy:
+    name: kevin_davey_breakout
+    params:
+      lookback_bars: 40           # Donchian-style breakout window
+      atr_period: 14
+      atr_stop_mult: 2.0          # initial stop = N * ATR
+      atr_target_mult: 4.0        # profit target = N * ATR (2:1 R)
+      volatility_filter_atr_pct: 0.0003  # min ATR / price ratio to trade
+      time_exit_bars: 48          # flat by this many bars if no stop/target
+      risk_per_trade_pct: 0.5     # % of account equity risked per trade
+      max_open_positions: 5
+      max_daily_loss_pct: 2.0     # hard kill-switch per UTC day
+      trading_window_utc:         # restrict trading hours (UTC)
+        start: "06:00"
+        end:   "20:00"
+
+accounts:
+  - name: demo-primary
+    account_id: "101-001-0000000-001"
+    access_token: "PUT_YOUR_DEMO_TOKEN_HERE"
+    # any field below overrides defaults
+    # instruments:
+    #   - EUR_USD
+    #   - USD_JPY
+    #   - XAU_USD
+    # strategy:
+    #   params:
+    #     risk_per_trade_pct: 0.25
+
+  # - name: demo-secondary
+  #   account_id: "101-001-0000000-002"
+  #   access_token: "ANOTHER_DEMO_TOKEN"
+  #   strategy:
+  #     params:
+  #       lookback_bars: 20
+  #       atr_stop_mult: 1.5
