@@ -1,20 +1,23 @@
-# Multi-account configuration.
-# Duplicate a block to add another OANDA account. Everything under `strategy`
-# can be overridden per account. Tokens here MUST be demo (practice) tokens
-# until the strategy has been incubated - see README.
+# Multi-account configuration for the Fibonacci day-trading bot.
+# Duplicate a block in `accounts:` to add another OANDA account. Anything
+# under `strategy` (or any other section) can be overridden per account.
+# Tokens here MUST be demo (practice) tokens until the strategy has been
+# incubated - see README.
 #
-# Defaults below are tuned for a $1,000 USD starting balance:
-#   - 1% risk per trade = ~$10 risked
-#   - max 3 concurrent positions so total at-risk capital stays around $30
-#   - hard daily-loss kill switch at 3% = ~$30
-#   - FX majors + metals + some indices (many instruments are filtered out
-#     automatically because their min trade size * stop distance exceeds $10)
+# Defaults are tuned for a $1,000 USD starting balance:
+#   - 1% risk per trade  -> ~$10 risked per setup
+#   - max 3 concurrent positions -> ~$30 total at-risk capital
+#   - hard daily-loss kill switch at 3% -> ~$30 daily stop
+#   - M5 candles for intraday Fibonacci pullbacks
+#   - All practice-tradeable instruments are scanned automatically; many
+#     high-priced ones (XAU_USD, indices, BTC) get auto-skipped because
+#     position size falls below the broker minimum at $10 risk.
 
 defaults:
-  environment: practice           # practice | live
-  granularity: M15                # candle size (M1, M5, M15, H1, etc.)
-  tick_interval_seconds: 30       # how often each worker polls OANDA
-  instruments: "ALL_TRADEABLE"    # "ALL_TRADEABLE" or explicit list below
+  environment: practice           # practice | live  (KEEP practice while testing)
+  granularity: M5                 # M1 / M5 / M15 / H1 - M5 is the day-trading sweet spot
+  tick_interval_seconds: 20       # how often each worker polls OANDA
+  instruments: "ALL_TRADEABLE"    # "ALL_TRADEABLE" or an explicit list below
   excluded_instruments: []        # e.g. ["XAU_XAG", "USB10Y_USD"]
   initial_capital_usd: 1000       # reference only; sizing uses live NAV
   log_evaluations: true           # emit per-instrument numbers each tick
@@ -24,21 +27,28 @@ defaults:
       bot_token: "PUT_TELEGRAM_BOT_TOKEN_HERE"
       chat_id:   "PUT_TELEGRAM_CHAT_ID_HERE"
       notify_on:                  # events that trigger a message
-        - order_filled
+        - order_filled            # every newly opened trade
+        # - startup               # also message when a worker starts up
   strategy:
-    name: kevin_davey_breakout
+    name: fibonacci_day_trading
     params:
-      lookback_bars: 40           # Donchian-style breakout window
+      # --- Fibonacci core ---
+      swing_lookback: 30          # bars used to anchor the most recent swing
+      trend_ema_period: 50        # EMA used to define intraday trend bias
+      entry_zone_low: 0.382       # shallower edge of the "golden zone"
+      entry_zone_high: 0.618      # deeper edge
+      invalidation_fib: 0.786     # stop sits just past this retracement
+      target_extension: 1.272     # take-profit Fibonacci extension
       atr_period: 14
-      atr_stop_mult: 2.0          # initial stop = N * ATR
-      atr_target_mult: 4.0        # profit target = N * ATR (2:1 R)
-      volatility_filter_atr_pct: 0.0003  # min ATR / price ratio to trade
-      time_exit_bars: 48          # flat by this many bars if no stop/target
-      risk_per_trade_pct: 1.0     # % of equity risked per trade ($10 on $1k)
-      max_open_positions: 3       # cap concurrent risk at ~3% equity
+      min_atr_pct: 0.0002         # min ATR / price to bother trading
+
+      # --- Portfolio risk (Davey-style controls) ---
+      risk_per_trade_pct: 1.0     # 1% of NAV -> ~$10 on a $1,000 account
+      max_open_positions: 3       # cap simultaneous risk at ~3 * 1% = 3%
       max_daily_loss_pct: 3.0     # hard kill-switch per UTC day
-      trading_window_utc:         # restrict trading hours (UTC)
-        start: "06:00"
+      time_exit_bars: 24          # day-trading: flatten after ~2h on M5
+      trading_window_utc:         # restrict trading to active intraday hours
+        start: "07:00"
         end:   "20:00"
 
 accounts:
@@ -49,7 +59,7 @@ accounts:
     # instruments:
     #   - EUR_USD
     #   - USD_JPY
-    #   - XAU_USD
+    #   - GBP_USD
     # strategy:
     #   params:
     #     risk_per_trade_pct: 0.5
@@ -57,12 +67,14 @@ accounts:
   # - name: demo-secondary
   #   account_id: "101-001-0000000-002"
   #   access_token: "ANOTHER_DEMO_TOKEN"
+  #   granularity: M15
   #   notifications:
   #     telegram:
   #       enabled: true
   #       bot_token: "..."
-  #       chat_id:   "..."
+  #       chat_id:   "..."     # can be a different channel per account
   #   strategy:
   #     params:
-  #       lookback_bars: 20
-  #       atr_stop_mult: 1.5
+  #       swing_lookback: 40
+  #       entry_zone_low: 0.5
+  #       entry_zone_high: 0.618

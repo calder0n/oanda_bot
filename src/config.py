@@ -16,20 +16,35 @@ class TradingWindow(BaseModel):
 
 
 class StrategyParams(BaseModel):
+    # Shared / portfolio-level controls (consumed by the runner, not the
+    # strategy itself).
+    risk_per_trade_pct: float = 0.5
+    max_open_positions: int = 5
+    max_daily_loss_pct: float = 2.0
+    time_exit_bars: int = 48
+    trading_window_utc: TradingWindow = Field(default_factory=TradingWindow)
+
+    # Kevin Davey breakout params
     lookback_bars: int = 40
     atr_period: int = 14
     atr_stop_mult: float = 2.0
     atr_target_mult: float = 4.0
     volatility_filter_atr_pct: float = 0.0003
-    time_exit_bars: int = 48
-    risk_per_trade_pct: float = 0.5
-    max_open_positions: int = 5
-    max_daily_loss_pct: float = 2.0
-    trading_window_utc: TradingWindow = Field(default_factory=TradingWindow)
+
+    # Fibonacci day-trading params
+    swing_lookback: int = 30
+    trend_ema_period: int = 50
+    entry_zone_low: float = 0.382
+    entry_zone_high: float = 0.618
+    invalidation_fib: float = 0.786
+    target_extension: float = 1.272
+    min_atr_pct: float = 0.0002
+
+    model_config = {"extra": "allow"}
 
 
 class StrategyConfig(BaseModel):
-    name: str = "kevin_davey_breakout"
+    name: str = "fibonacci_day_trading"
     params: StrategyParams = Field(default_factory=StrategyParams)
 
 

@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 from .base import Strategy
+from .fibonacci_day_trading import FibonacciDayTrading
 from .kevin_davey import KevinDaveyBreakout
 
 _REGISTRY: dict[str, type[Strategy]] = {
     KevinDaveyBreakout.name: KevinDaveyBreakout,
+    FibonacciDayTrading.name: FibonacciDayTrading,
 }
 
 
