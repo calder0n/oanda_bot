@@ -1,348 +1,289 @@
-# OANDA Algo Bot — Kevin Davey Strategy
+# OANDA Bot — Sergey Magala FOTSI Strategy
 
-Production-ready scaffold for running a **Kevin Davey-style volatility-filtered
-breakout strategy** against **OANDA** across all demo-tradeable instruments,
-with native multi-account support and a Docker-first deployment.
+Bot de trading en Python que ejecuta la **estrategia de Sergey Magala usando el
+indicador FOTSI** contra **OANDA (cuenta demo)** sobre **todos los instrumentos
+disponibles** en temporalidad **M1 (1 minuto)**. Diseñado para correr en Docker,
+soporte nativo multi-cuenta, capital inicial de referencia **$1,000 USD**,
+notificaciones Telegram por cada entrada nueva y un registro SQLite compartido
+para que un bot compañero pueda auditar y cerrar posiciones.
 
-> ⚠️ **Demo only until incubated.** Per Davey's own methodology, a strategy
-> must pass out-of-sample testing, Monte Carlo stress tests, and a multi-month
-> incubation period on a **practice** account before any live capital is risked.
-> This repo defaults to `environment: practice`. Do not flip to `live` until
-> you have done that work.
+> ⚠️ **Solo cuenta demo.** El repo defaultea a `environment: practice`. No
+> muevas a `live` hasta haber validado la estrategia con incubación real.
 
 ---
 
-## Strategy summary
+## 1. Qué es el indicador FOTSI
 
-Family: **volatility-filtered channel breakout** with ATR-based stops, an
-R-multiple target, and a hard time-based exit — one of the archetypes Davey
-describes in *Building Winning Algorithmic Trading Systems*.
+FOTSI (*Fast Oscillator Trend Strength Index*) es un indicador compuesto
+popularizado por Sergey Magala. Combina tres lecturas independientes del
+mercado en un único score `[-100, +100]`:
 
-| Rule       | Default                                                   |
-|------------|-----------------------------------------------------------|
-| Entry long | close > Donchian high of last `lookback_bars` (default 40)|
-| Entry short| close < Donchian low of last `lookback_bars`              |
-| Vol filter | ATR / price ≥ `volatility_filter_atr_pct`                 |
-| Stop       | `atr_stop_mult × ATR` from entry (default 2.0)            |
-| Target     | `atr_target_mult × ATR` from entry (default 4.0 → 2R)     |
-| Time exit  | flatten after `time_exit_bars` bars (default 48)          |
-| Sizing     | `risk_per_trade_pct` of NAV, from entry→stop distance     |
-| Kill-switch| daily realized DD ≥ `max_daily_loss_pct` stops new trades |
-| Hours      | restricted to `trading_window_utc.start..end`             |
+| Componente | Fuente                                | Contribuye |
+|------------|---------------------------------------|-----------|
+| `trend`    | posición del precio vs EMA(8/21/55)   | dirección |
+| `momentum` | Stochastic %K centrado + su derivada  | timing    |
+| `strength` | ADX con signo (+DI vs −DI)            | fuerza    |
 
-All parameters are per-account and live in `config/accounts.yaml`.
+```
+FOTSI = w_trend · trend + w_mom · momentum + w_str · strength   (normalizado)
+```
 
-### Tuning for a $1,000 starting balance
+La fórmula exacta de Magala no es pública; esta implementación construye el
+mismo tipo de compuesto a partir de las primitivas que él enfatiza. Los pesos
+y periodos son parámetros en `config/accounts.yaml` para poder ajustarlos.
 
-The defaults in `config/accounts.example.yaml` are set for **$1,000 USD**:
+## 2. Reglas de la estrategia (`magala_fotsi`)
 
-| Param                  | Default | On $1,000        |
+**Entry LONG** cuando se cumplen todas:
+
+* `FOTSI ≥ entry_threshold` (default 55)
+* `trend > 0` y `strength ≥ strength_min`
+* `price > EMA_fast`  (sesgo alcista confirmado)
+* `momentum` estuvo negativo en las últimas `pullback_lookback` velas
+  (compramos el pullback, no el rebote agotado)
+
+**Entry SHORT**: espejo simétrico.
+
+**Salidas** (adjuntas como SL/TP al orden de OANDA):
+
+* `SL  = entry ∓ atr_stop_mult × ATR`   (default 1.5)
+* `TP  = entry ± atr_target_mult × ATR` (default 3.0 → R:R = 2:1)
+
+**Filtros**:
+
+* `min_atr_pct`: ignora instrumentos con volatilidad relativa demasiado baja
+* `trading_window_utc`: solo opera en la ventana horaria configurada (UTC)
+* `max_daily_loss_pct`: kill-switch por drawdown diario realizado
+* `max_open_positions`: cap de exposición concurrente
+
+### Dimensionamiento para $1,000 USD
+
+| Parámetro              | Default | En $1,000 USD    |
 |------------------------|---------|------------------|
-| `risk_per_trade_pct`   | 1.0     | ~$10 per trade   |
-| `max_open_positions`   | 3       | ~$30 total risk  |
-| `max_daily_loss_pct`   | 3.0     | ~$30 daily stop  |
+| `risk_per_trade_pct`   | 1.0     | ~$10 por trade   |
+| `max_open_positions`   | 3       | ~$30 riesgo total|
+| `max_daily_loss_pct`   | 3.0     | ~$30 stop diario |
 
-**Expect many instruments to be skipped.** With only ~$10 to risk, the
-position sizer (`risk_amount / stop_distance`) will fall below the instrument's
-minimum trade size for high-priced assets (XAU_USD, indices, BTC CFDs).
-Those skips are logged as `skipped_min_size` — you'll see FX majors and
-smaller-priced pairs trade regularly and high-priced assets stay flat.
+Muchos instrumentos serán descartados automáticamente: con solo $10 de riesgo
+por trade, el sizer (`risk_amount / stop_distance`) queda por debajo del
+`minimumTradeSize` en activos caros (índices, oro, BTC CFDs). Esos skips
+aparecen en los logs como `skipped_min_size`.
 
-If you want more coverage, you can (in order of risk increase):
-1. Use a finer `granularity` (e.g. `M5`) so ATR — and thus the stop distance —
-   is smaller.
-2. Lower `atr_stop_mult` (e.g. 1.5).
-3. Whitelist only FX majors via the `instruments:` list.
-4. Raise `risk_per_trade_pct` cautiously (never beyond 2% on a $1k account).
-
----
-
-## Project layout
+## 3. Estructura del proyecto
 
 ```
 oanda_bot/
+├── config/
+│   └── accounts.example.yaml     # multi-cuenta, defaults heredables
+├── src/
+│   ├── main.py                   # entrypoint, arranca 1 worker por cuenta
+│   ├── config.py                 # esquema Pydantic
+│   ├── account_worker.py         # ciclo tick por cuenta
+│   ├── oanda_client.py           # wrapper OANDA v20 con retry
+│   ├── indicators/
+│   │   ├── fotsi.py              # FOTSI compuesto
+│   │   └── technical.py          # ATR, EMA, Donchian, TR
+│   ├── strategy/
+│   │   ├── base.py               # interfaz Strategy / Signal
+│   │   ├── magala_fotsi.py       # estrategia principal (default)
+│   │   ├── kevin_davey.py        # estrategia previa (opt-in)
+│   │   └── registry.py           # registry name -> class
+│   ├── risk/
+│   │   └── manager.py            # sizing + kill switch
+│   ├── notifications/
+│   │   └── telegram.py           # notifier async, ID/TP/SL en mensaje
+│   ├── persistence/
+│   │   └── trade_registry.py     # SQLite compartido (id/entry/TP/SL/exit)
+│   └── utils/logger.py           # structlog JSON a stdout
+├── tests/
+│   ├── test_strategy.py
+│   ├── test_magala_fotsi.py
+│   └── test_trade_registry.py
 ├── Dockerfile
 ├── docker-compose.yml
 ├── requirements.txt
-├── .env.example
-├── config/
-│   └── accounts.example.yaml      # copy to accounts.yaml
-├── src/
-│   ├── main.py                    # entrypoint
-│   ├── config.py                  # YAML + pydantic loader
-│   ├── oanda_client.py            # async OANDA wrapper (retries)
-│   ├── account_worker.py          # one isolated worker per account
-│   ├── strategy/
-│   │   ├── base.py
-│   │   ├── kevin_davey.py         # the strategy
-│   │   └── registry.py            # name -> class
-│   ├── risk/manager.py            # sizing + daily-loss kill switch
-│   ├── indicators/technical.py    # ATR, Donchian, EMA
-│   ├── notifications/telegram.py  # Telegram notifier (order_filled, etc.)
-│   └── utils/logger.py            # structured JSON logs
-└── tests/
-    └── test_strategy.py
+└── .env.example
 ```
 
-Each account in the YAML spawns its own `asyncio` worker with its own token,
-strategy instance, and risk state — nothing is shared between accounts.
-Adding another account = adding another YAML block.
+### Multi-cuenta
 
----
+Cada bloque bajo `accounts:` genera un `AccountWorker` independiente (asyncio
+task). Herencia con `defaults:` para no duplicar. Puedes correr distintas
+estrategias por cuenta cambiando `strategy.name` (`magala_fotsi` o
+`kevin_davey_breakout`).
 
-## 1. Prerequisites
+```yaml
+accounts:
+  - name: demo-primary
+    account_id: "101-001-0000000-001"
+    access_token: "..."
+  - name: demo-secondary
+    account_id: "101-001-0000000-002"
+    access_token: "..."
+    strategy:
+      params:
+        entry_threshold: 65.0
+        atr_stop_mult: 1.2
+```
 
-- An OANDA **practice (fxTrade Practice)** account: <https://www.oanda.com/demo-account/>
-- A **v20 API token** (generate inside the practice portal → *Manage API Access*)
-- Your practice **account ID** (e.g. `101-001-0000000-001`)
-- **Docker** + **Docker Compose v2** installed
+## 4. Instalación
 
-Optional for local (non-Docker) runs: Python 3.12+.
+### 4.1 Prerrequisitos
 
----
+* Cuenta demo de OANDA + `Access Token` (Manage API Access en fxTrade Practice)
+* Docker 24+ y docker compose plugin
+* (Opcional) Bot de Telegram con su `bot_token` y el `chat_id` del canal
 
-## 2. Installation — Docker (recommended)
+### 4.2 Bot de Telegram
+
+1. Habla con [@BotFather](https://t.me/BotFather) en Telegram → `/newbot`
+2. Guarda el `HTTP API token`
+3. Añade el bot a tu canal como admin
+4. Manda un mensaje al canal, luego consulta:
+   `https://api.telegram.org/bot<TOKEN>/getUpdates` para leer el `chat.id`
+
+### 4.3 Clonar y configurar
 
 ```bash
-git clone <this-repo> oanda_bot
+git clone <URL_DE_ESTE_REPO> oanda_bot
 cd oanda_bot
-git checkout algo_trading
+git checkout fotsi_trading
 
-# 1. Copy the example configs
 cp .env.example .env
 cp config/accounts.example.yaml config/accounts.yaml
-
-# 2. Fill in config/accounts.yaml with your OANDA practice token + account ID
-#    (see "Multi-account" below to add more accounts)
-$EDITOR config/accounts.yaml
-
-# 3. Build and run
-docker compose build
-docker compose up -d
-
-# 4. Watch logs (JSON, one line per event)
-docker compose logs -f oanda-bot
 ```
 
-Stop and clean up:
+Edita `config/accounts.yaml`:
+
+* Rellena `access_token` y `account_id` (cuenta demo).
+* Rellena `notifications.telegram.bot_token` y `chat_id` (o deja
+  `enabled: false` para desactivar).
+* Cambia parámetros por cuenta si quieres A/B testing entre configuraciones.
+
+### 4.4 Arrancar con Docker (recomendado)
 
 ```bash
-docker compose down
+docker compose build
+docker compose up -d
+docker compose logs -f oanda-bot   # ver logs en JSON
 ```
 
-### What the container does on startup
+Estado y logs quedan en:
 
-1. Loads `config/accounts.yaml` (mounted read-only).
-2. Fetches the full list of practice-tradeable instruments per account via
-   OANDA's `AccountInstruments` endpoint — so **every asset you can trade on
-   the demo account** is covered automatically (FX majors/minors/exotics,
-   metals, indices, bonds, commodities, crypto CFDs where available in your
-   region).
-3. Spawns one async worker per account; each worker polls candles at
-   `tick_interval_seconds` and evaluates the strategy per instrument.
-4. Orders are submitted with server-side SL/TP attached so protection exists
-   even if the bot crashes.
+* `./logs/`    → salidas de contenedor
+* `./state/`   → **`trades.sqlite3`** (registro compartido de entradas)
+* `./config/`  → montado read-only
 
----
-
-## 3. Installation — local (for development / backtesting harness)
+### 4.5 Correr sin Docker (dev)
 
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-cp config/accounts.example.yaml config/accounts.yaml
-$EDITOR config/accounts.yaml
-
-CONFIG_PATH=config/accounts.yaml python -m src.main
+export CONFIG_PATH=config/accounts.yaml
+export TRADE_DB_PATH=state/trades.sqlite3
+python -m src.main
 ```
 
-Run tests:
+### 4.6 Correr los tests
 
 ```bash
 pip install pytest
 pytest -q
 ```
 
----
+## 5. Observabilidad
 
-## 4. Multi-account configuration
+### 5.1 Logs (`structlog` JSON en stdout)
 
-`config/accounts.yaml` uses a two-section format: a shared `defaults:` block
-and an `accounts:` list. Any key under an account overrides the default.
+En cada tick, y por cada instrumento evaluado, el bot emite un evento
+`evaluation` con **los números que está evaluando**:
 
-```yaml
-defaults:
-  environment: practice
-  granularity: M15
-  instruments: "ALL_TRADEABLE"
-  strategy:
-    name: kevin_davey_breakout
-    params:
-      lookback_bars: 40
-      atr_stop_mult: 2.0
-      atr_target_mult: 4.0
-      risk_per_trade_pct: 0.5
-      max_daily_loss_pct: 2.0
-
-accounts:
-  - name: demo-primary
-    account_id: "101-001-0000000-001"
-    access_token: "DEMO_TOKEN_A"
-
-  - name: demo-secondary
-    account_id: "101-001-0000000-002"
-    access_token: "DEMO_TOKEN_B"
-    granularity: H1                # override
-    strategy:
-      params:
-        lookback_bars: 20          # override
-        risk_per_trade_pct: 0.25   # override
-
-  - name: demo-fx-only
-    account_id: "101-001-0000000-003"
-    access_token: "DEMO_TOKEN_C"
-    instruments:                    # explicit list instead of ALL_TRADEABLE
-      - EUR_USD
-      - USD_JPY
-      - GBP_USD
+```json
+{"event":"evaluation","instrument":"EUR_USD","signal":"NONE","reason":"below_long_threshold",
+ "price":1.08423,"ema_fast":1.08419,"trend":40.0,"momentum":12.3,"strength":18.4,
+ "fotsi":24.7,"atr":0.00021,"atr_pct":0.000194,"entry_threshold":55.0,
+ "strength_min":20.0,"bar_time":"2026-07-20T14:22:00+00:00"}
 ```
 
-Adding a fourth account is just another list item — the runner scales
-horizontally inside the same container (one asyncio task per account), and the
-process is fully restart-safe.
+Nivel del proceso: `tick` con equity, moneda, posiciones abiertas, y estado
+del kill-switch. Cuando se llena una orden: `order_filled` con precio de fill,
+SL, TP y trade_id.
 
-### Running different strategies per account
+### 5.2 Telegram
 
-Register a new strategy class in `src/strategy/registry.py` and reference it
-by `strategy.name` in the YAML. The `Strategy` base class in
-`src/strategy/base.py` is two methods (`required_bars`, `evaluate`).
+Cada entrada nueva dispara un mensaje con:
 
----
+* Instrumento y lado (LONG / SHORT)
+* Cuenta y `Trade ID` de OANDA
+* Estrategia usada
+* Precio de entrada, **Stop-Loss**, **Take-Profit**
+* Equity y monto arriesgado
+* Timestamp de apertura (UTC ISO-8601)
+* Valores FOTSI/trend/momentum/strength/ATR en el momento de la señal
 
-## 5. Telegram notifications
+Cada cierre (TP / SL / time-exit / manual) dispara un mensaje adicional con
+precio de salida, P/L realizado y motivo. Los eventos suscritos se controlan
+en `notifications.telegram.notify_on`.
 
-The bot posts a Telegram message every time a new trade is opened
-(`order_filled` event). Setup:
+## 6. Registro de trades (SQLite compartido)
 
-1. **Create a bot**: talk to [@BotFather](https://t.me/BotFather) in Telegram,
-   run `/newbot`, answer the prompts, and save the token it returns (looks
-   like `123456789:AAH...`).
-2. **Get your chat ID**: start a chat with your new bot (send `/start`), then
-   open `https://api.telegram.org/bot<TOKEN>/getUpdates` in a browser. The
-   `chat.id` field in the JSON response is what you want. For a group, add
-   the bot to the group and read `chat.id` from the same endpoint (group IDs
-   are negative).
-3. **Fill `config/accounts.yaml`** under the account (or under `defaults:`):
+El bot escribe cada entrada abierta en `state/trades.sqlite3`. La tabla
+`trades` incluye:
 
-   ```yaml
-   notifications:
-     telegram:
-       enabled: true
-       bot_token: "123456789:AAH..."
-       chat_id:   "987654321"
-       notify_on:
-         - order_filled       # every new trade
-         # - startup          # also message when a worker starts
-   ```
+```
+trade_id, account_name, account_id, instrument, side, units,
+entry_price, stop_loss_price, take_profit_price, strategy, reason,
+opened_at, closed_at, exit_price, close_reason, realized_pl, extra_json
+```
 
-4. Restart: `docker compose restart`. You should see a message like:
-
-   ```
-   🟢 New LONG on EUR_USD
-   • Account: demo-primary
-   • Units: 1950
-   • Entry: 1.08425
-   • Stop: 1.07912
-   • Target: 1.09452
-   • Reason: breakout_high
-   • Equity: 1002.37 (risk ≈ 10.02)
-   ```
-
-Different accounts can notify different chats — override the `notifications`
-block inside a specific account entry.
-
----
-
-## 6. Operations
-
-**Logs** are JSON, one event per line. Each tick you'll see:
-
-| Event            | Meaning                                                    |
-|------------------|------------------------------------------------------------|
-| `tick`           | Once per poll: equity, open positions, kill-switch state.  |
-| `evaluation`     | Per instrument: price, ATR, ATR%, donchian_high/low, signal, reason. |
-| `skipped_min_size` | Strategy fired but units < instrument minimum (common on $1k). |
-| `order_filled`   | A market order was accepted by OANDA.                      |
-| `time_exit`      | A trade was flattened by the time-exit rule.               |
-
-Examples:
+El fichero se abre en modo **WAL** para que un segundo proceso (el "closer
+bot" que quieres añadir después) pueda leer trades abiertos, consultar precio
+en OANDA y cerrar posiciones sin colisionar con las escrituras del strategy
+bot. Para inspección rápida:
 
 ```bash
-# Watch new orders only
-docker compose logs --no-log-prefix oanda-bot | jq 'select(.event=="order_filled")'
-
-# See the numbers the bot is evaluating for EUR_USD
-docker compose logs --no-log-prefix oanda-bot \
-  | jq 'select(.event=="evaluation" and .instrument=="EUR_USD")'
-
-# See everything that got blocked by volatility filter
-docker compose logs --no-log-prefix oanda-bot \
-  | jq 'select(.reason=="low_volatility") | {instrument, atr_pct, vol_filter}'
+sqlite3 state/trades.sqlite3 \
+  "SELECT trade_id,instrument,side,entry_price,stop_loss_price,take_profit_price,closed_at
+   FROM trades ORDER BY opened_at DESC LIMIT 20;"
 ```
 
-To silence per-instrument evaluation lines, set `log_evaluations: false` on
-the account (or defaults).
+Un consumidor externo puede reutilizar la misma clase:
 
-**Graceful shutdown**: `docker compose stop` sends SIGTERM; the bot finishes
-its current tick (≤ `tick_interval_seconds`) and exits. Attached SL/TP keeps
-open positions protected on OANDA's side.
+```python
+from src.persistence import TradeRegistry
+reg = TradeRegistry("state/trades.sqlite3")
+for t in reg.open_trades():
+    print(t["trade_id"], t["instrument"], t["entry_price"], t["take_profit_price"])
+```
 
-**Update config without rebuilding**: the config volume is mounted live.
-Edit `config/accounts.yaml` and `docker compose restart`.
+## 7. Añadir una cuenta más
 
-**Resource limits**: the Compose file caps the bot at 1 CPU / 512 MB. Adjust
-in `docker-compose.yml` if you run a lot of accounts.
+1. Duplica el bloque bajo `accounts:` en `config/accounts.yaml`.
+2. Cambia `name`, `account_id`, `access_token`.
+3. `docker compose restart oanda-bot`.
 
----
+El registro SQLite comparte fila; el `account_name` distingue de qué cuenta
+proviene cada entrada.
 
-## 7. Davey-style deployment checklist
+## 8. Comandos útiles
 
-Do **not** skip steps. From *Building Winning Algorithmic Trading Systems*:
+```bash
+docker compose logs -f oanda-bot        # seguir logs
+docker compose down                     # parar
+docker compose up -d --build            # rebuild + arrancar
+sqlite3 state/trades.sqlite3 ".schema"  # inspeccionar el registro
+```
 
-- [ ] In-sample backtest the strategy on historical OANDA data (≥ 5 years).
-- [ ] Out-of-sample test on held-out data (≥ 30 % of history).
-- [ ] Monte Carlo: randomize trade order 1000× — require acceptable DD
-      and profit percentiles.
-- [ ] Walk-forward optimize the params you care about.
-- [ ] Incubate on this repo's practice config for ≥ 2–3 months.
-- [ ] Only then consider `environment: live` — and start with `risk_per_trade_pct`
-      at a fraction of the incubation setting.
+## 9. Roadmap del segundo bot ("closer")
 
-A backtest harness is deliberately out of scope for this initial scaffold —
-plug `src/strategy/kevin_davey.py` into your preferred engine (vectorbt,
-backtrader, bt). The indicator code in `src/indicators/technical.py` is pure
-pandas and drop-in compatible.
+Este repo deja preparados:
 
----
+* Registro `state/trades.sqlite3` en modo WAL (lectura concurrente segura).
+* Método `TradeRegistry.open_trades()` para listar entradas activas.
+* Método `TradeRegistry.mark_closed(trade_id, exit_price, realized_pl, reason)`
+  para registrar cierres desde ese segundo proceso.
+* Método `OandaClient.close_trade(trade_id)` y `get_trade(trade_id)` reusables.
 
-## 8. Security notes
-
-- `config/accounts.yaml` is in `.gitignore`. Never commit your tokens.
-- Use a different token per account; scope each to the specific account ID.
-- The Dockerfile runs as a non-root user.
-- Rotate tokens regularly via the OANDA portal.
-
----
-
-## 9. Troubleshooting
-
-| Symptom | Likely cause |
-|---|---|
-| `config_load_failed` on start | `config/accounts.yaml` missing or malformed. |
-| `V20Error` 401 | Wrong `access_token` or wrong `environment` (live vs practice). |
-| No trades ever | `trading_window_utc` too narrow, `volatility_filter_atr_pct` too high, or `lookback_bars` too long relative to `count`. |
-| `order_failed` with units=0 | Stop distance is zero or below instrument minimum trade size. |
-| `daily_loss_limit_hit` | Intended kill-switch; resets automatically at 00:00 UTC. |
-| `telegram_send_failed` | Wrong bot token, wrong chat ID, or bot blocked in the chat. |
-| Many `skipped_min_size` events | Normal on a $1k account for high-priced assets; see "Tuning for a $1,000 starting balance" above. |
+El closer típicamente vive como un servicio adicional en `docker-compose.yml`
+compartiendo el volumen `./state`.

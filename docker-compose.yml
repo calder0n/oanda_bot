@@ -9,6 +9,7 @@ services:
     environment:
       - CONFIG_PATH=/app/config/accounts.yaml
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - TRADE_DB_PATH=/app/state/trades.sqlite3
     volumes:
       - ./config:/app/config:ro
       - ./logs:/app/logs

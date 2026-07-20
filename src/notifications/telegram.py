@@ -71,20 +71,53 @@ class TelegramNotifier:
         reason: str,
         equity: float,
         risk_pct: float,
+        trade_id: str | None = None,
+        strategy: str | None = None,
+        opened_at: str | None = None,
+        indicators: dict | None = None,
     ) -> None:
         if not self.should_notify("order_filled"):
             return
         risk_amount = equity * (risk_pct / 100.0) if equity > 0 else 0.0
         emoji = "🟢" if side == "LONG" else "🔴"
+        lines = [
+            f"{emoji} *New {side}* on `{instrument}`",
+            f"• Account: `{account}`",
+            f"• Trade ID: `{trade_id or 'n/a'}`",
+            f"• Strategy: `{strategy or 'n/a'}`",
+            f"• Units: `{units}`",
+            f"• Entry: `{entry}`",
+            f"• Stop-Loss: `{stop}`",
+            f"• Take-Profit: `{target}`",
+            f"• Reason: `{reason}`",
+            f"• Equity: `{equity:.2f}` (risk ≈ `{risk_amount:.2f}`)",
+        ]
+        if opened_at:
+            lines.append(f"• Opened at: `{opened_at}`")
+        if indicators:
+            parts = ", ".join(f"{k}={v}" for k, v in indicators.items())
+            lines.append(f"• Indicators: `{parts}`")
+        await self.send("\n".join(lines))
+
+    async def notify_trade_closed(
+        self,
+        account: str,
+        instrument: str,
+        trade_id: str,
+        exit_price: float | None,
+        realized_pl: float | None,
+        close_reason: str,
+    ) -> None:
+        if not self.should_notify("trade_closed"):
+            return
+        pl = f"{realized_pl:+.2f}" if realized_pl is not None else "n/a"
         text = (
-            f"{emoji} *New {side}* on `{instrument}`\n"
+            f"⚪ *Trade closed* on `{instrument}`\n"
             f"• Account: `{account}`\n"
-            f"• Units: `{units}`\n"
-            f"• Entry: `{entry}`\n"
-            f"• Stop: `{stop}`\n"
-            f"• Target: `{target}`\n"
-            f"• Reason: `{reason}`\n"
-            f"• Equity: `{equity:.2f}` (risk ≈ `{risk_amount:.2f}`)"
+            f"• Trade ID: `{trade_id}`\n"
+            f"• Exit: `{exit_price}`\n"
+            f"• Reason: `{close_reason}`\n"
+            f"• Realized P/L: `{pl}`"
         )
         await self.send(text)
 

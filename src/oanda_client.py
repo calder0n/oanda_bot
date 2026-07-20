@@ -108,6 +108,11 @@ class OandaClient:
         r = trades.OpenTrades(accountID=self.account_id)
         return (await self._call(r)).get("trades", [])
 
+    async def get_trade(self, trade_id: str) -> dict:
+        r = trades.TradeDetails(accountID=self.account_id, tradeID=trade_id)
+        resp = await self._call(r)
+        return resp.get("trade", {}) or {}
+
     async def market_order(
         self,
         instrument: str,

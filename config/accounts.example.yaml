@@ -1,52 +1,70 @@
-# Multi-account configuration.
-# Duplicate a block to add another OANDA account. Everything under `strategy`
-# can be overridden per account. Tokens here MUST be demo (practice) tokens
-# until the strategy has been incubated - see README.
+# Multi-account configuration for the Sergey Magala FOTSI bot.
+# Duplicate an entry under `accounts:` to add another OANDA account. Every
+# field under `defaults:` (including `strategy.params`) can be overridden per
+# account. Tokens MUST be practice (demo) tokens until the strategy is proven.
 #
-# Defaults below are tuned for a $1,000 USD starting balance:
-#   - 1% risk per trade = ~$10 risked
-#   - max 3 concurrent positions so total at-risk capital stays around $30
-#   - hard daily-loss kill switch at 3% = ~$30
-#   - FX majors + metals + some indices (many instruments are filtered out
-#     automatically because their min trade size * stop distance exceeds $10)
+# Defaults below are tuned for a $1,000 USD demo balance:
+#   - 1% risk per trade       -> ~$10 risked per open position
+#   - max 3 concurrent trades -> ~$30 total at-risk capital
+#   - hard daily-loss cutoff  -> 3% = $30
+#   - 1-minute candles across all OANDA-tradeable instruments
 
 defaults:
-  environment: practice           # practice | live
-  granularity: M15                # candle size (M1, M5, M15, H1, etc.)
-  tick_interval_seconds: 30       # how often each worker polls OANDA
-  instruments: "ALL_TRADEABLE"    # "ALL_TRADEABLE" or explicit list below
-  excluded_instruments: []        # e.g. ["XAU_XAG", "USB10Y_USD"]
-  initial_capital_usd: 1000       # reference only; sizing uses live NAV
-  log_evaluations: true           # emit per-instrument numbers each tick
+  environment: practice            # practice | live
+  granularity: M1                  # 1-minute candles per user request
+  tick_interval_seconds: 20        # how often each worker polls OANDA
+  instruments: "ALL_TRADEABLE"     # "ALL_TRADEABLE" or explicit list
+  excluded_instruments: []         # e.g. ["USB30Y_USD"]
+  initial_capital_usd: 1000        # reference only; sizing uses live NAV
+  log_evaluations: true            # emit per-instrument FOTSI numbers per tick
+
   notifications:
     telegram:
-      enabled: false              # set to true after filling bot_token + chat_id
+      enabled: false               # set to true after filling bot_token + chat_id
       bot_token: "PUT_TELEGRAM_BOT_TOKEN_HERE"
       chat_id:   "PUT_TELEGRAM_CHAT_ID_HERE"
-      notify_on:                  # events that trigger a message
-        - order_filled
+      notify_on:
+        - order_filled             # message when a new trade is opened
+        - trade_closed             # message when a trade closes (TP/SL/manual)
+
   strategy:
-    name: kevin_davey_breakout
+    name: magala_fotsi
     params:
-      lookback_bars: 40           # Donchian-style breakout window
-      atr_period: 14
-      atr_stop_mult: 2.0          # initial stop = N * ATR
-      atr_target_mult: 4.0        # profit target = N * ATR (2:1 R)
-      volatility_filter_atr_pct: 0.0003  # min ATR / price ratio to trade
-      time_exit_bars: 48          # flat by this many bars if no stop/target
-      risk_per_trade_pct: 1.0     # % of equity risked per trade ($10 on $1k)
-      max_open_positions: 3       # cap concurrent risk at ~3% equity
-      max_daily_loss_pct: 3.0     # hard kill-switch per UTC day
-      trading_window_utc:         # restrict trading hours (UTC)
-        start: "06:00"
-        end:   "20:00"
+      # --- FOTSI indicator configuration -----------------------------------
+      ema_fast: 8
+      ema_slow: 21
+      ema_trend: 55
+      stoch_period: 14
+      stoch_smooth: 3
+      adx_period: 14
+      weight_trend: 0.4            # composite FOTSI weights (sum > 0)
+      weight_momentum: 0.3
+      weight_strength: 0.3
+
+      # --- Entry rules -----------------------------------------------------
+      entry_threshold: 55.0        # |fotsi| >= this to consider entering
+      strength_min: 20.0           # |ADX-based strength| >= this
+      pullback_lookback: 5         # bars of recent counter-momentum required
+      min_atr_pct: 0.00015         # ignore instruments below this volatility
+
+      # --- Exits (attached SL/TP on the OANDA order) -----------------------
+      atr_stop_mult: 1.5           # SL distance = 1.5 * ATR
+      atr_target_mult: 3.0         # TP distance = 3.0 * ATR  (2:1 R)
+      time_exit_bars: 0            # 0 = disabled (a companion bot handles exits)
+
+      # --- Risk & session --------------------------------------------------
+      risk_per_trade_pct: 1.0      # % of NAV risked per trade ($10 on $1,000)
+      max_open_positions: 3        # cap total at-risk exposure
+      max_daily_loss_pct: 3.0      # hard kill switch per UTC day
+      trading_window_utc:
+        start: "06:00"             # London open
+        end:   "20:00"             # end of NY session
 
 accounts:
   - name: demo-primary
     account_id: "101-001-0000000-001"
     access_token: "PUT_YOUR_DEMO_TOKEN_HERE"
-    # any field below overrides defaults
-    # instruments:
+    # instruments:                 # uncomment to trade only a subset
     #   - EUR_USD
     #   - USD_JPY
     #   - XAU_USD
@@ -64,5 +82,5 @@ accounts:
   #       chat_id:   "..."
   #   strategy:
   #     params:
-  #       lookback_bars: 20
-  #       atr_stop_mult: 1.5
+  #       entry_threshold: 65.0
+  #       atr_stop_mult: 1.2

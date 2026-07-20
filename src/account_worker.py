@@ -1,20 +1,23 @@
 """One worker per OANDA account. Each worker is fully isolated.
 
-This makes it trivial to add more accounts: add another block to accounts.yaml,
-one more asyncio task is spawned, same strategy (or a different one) runs
-against that account's credentials.
+Adding another account is a one-liner in accounts.yaml: same strategy (or a
+different one) is spawned as another asyncio task against that account's
+credentials. Every trade the worker opens is persisted to a shared SQLite
+registry so a companion "closer" bot can read the same DB and manage exits.
 """
 from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Any
 
 import structlog
 
 from .config import AccountConfig
 from .notifications import TelegramNotifier
 from .oanda_client import OandaClient
+from .persistence import TradeRecord, TradeRegistry
 from .risk.manager import DailyLossTracker, compute_position_units
 from .strategy import Signal, SignalType, build_strategy
 from .utils.logger import get_logger
@@ -27,12 +30,17 @@ class _TradeMeta:
     trade_id: str
     instrument: str
     opened_at: datetime
+    entry_price: float
+    stop_price: float | None
+    target_price: float | None
+    side: str
     bars_held: int = 0
 
 
 @dataclass
 class AccountWorker:
     cfg: AccountConfig
+    registry: TradeRegistry | None = None
     _stop: asyncio.Event = field(default_factory=asyncio.Event)
 
     def stop(self) -> None:
@@ -71,6 +79,7 @@ class AccountWorker:
             initial_capital_usd=self.cfg.initial_capital_usd,
             risk_per_trade_pct=self.cfg.strategy.params.risk_per_trade_pct,
             telegram_enabled=notifier.enabled,
+            registry_path=str(self.registry.path) if self.registry else None,
         )
 
         try:
@@ -126,9 +135,16 @@ class AccountWorker:
 
         open_trades = await client.open_trades()
         open_by_instrument = {t["instrument"]: t for t in open_trades}
-        # prune tracked that are no longer open
+        open_ids = {str(t.get("id")) for t in open_trades}
+
+        # Reconcile: if a trade we opened is no longer open on OANDA
+        # (hit TP/SL or was closed externally), record and notify.
         for inst in list(tracked.keys()):
-            if inst not in open_by_instrument:
+            meta = tracked[inst]
+            if meta.trade_id not in open_ids:
+                await self._reconcile_close(
+                    client, notifier, logger, meta, reason="tp_sl_or_external"
+                )
                 tracked.pop(inst, None)
 
         logger.info(
@@ -140,8 +156,7 @@ class AccountWorker:
             daily_blocked=loss_tracker.trading_blocked,
         )
 
-        # time-based exit
-        await self._apply_time_exits(client, strategy, open_by_instrument, tracked, logger)
+        await self._apply_time_exits(client, notifier, tracked, open_by_instrument, logger)
 
         if loss_tracker.trading_blocked:
             logger.warning("daily_loss_limit_hit", equity=equity)
@@ -224,19 +239,53 @@ class AccountWorker:
                     client_tag=f"{self.cfg.name}:{strategy.name}",
                 )
                 fill = resp.get("orderFillTransaction") or {}
-                trade_id = str(fill.get("tradeOpened", {}).get("tradeID", ""))
+                trade_opened = fill.get("tradeOpened") or {}
+                trade_id = str(trade_opened.get("tradeID") or "")
+                fill_price = _safe_float(fill.get("price")) or signal.entry_price
+                opened_at_dt = datetime.now(timezone.utc)
+
                 if trade_id:
                     tracked[instrument] = _TradeMeta(
                         trade_id=trade_id,
                         instrument=instrument,
-                        opened_at=datetime.now(timezone.utc),
+                        opened_at=opened_at_dt,
+                        entry_price=float(fill_price or 0.0),
+                        stop_price=signal.stop_price,
+                        target_price=signal.target_price,
+                        side=signal.type.value,
                     )
-                    open_by_instrument[instrument] = {"instrument": instrument, "id": trade_id}
+                    open_by_instrument[instrument] = {
+                        "instrument": instrument,
+                        "id": trade_id,
+                    }
+                    if self.registry is not None:
+                        self.registry.record_open(
+                            TradeRecord(
+                                trade_id=trade_id,
+                                account_name=self.cfg.name,
+                                account_id=self.cfg.account_id,
+                                instrument=instrument,
+                                side=signal.type.value,
+                                units=int(units),
+                                entry_price=float(fill_price or 0.0),
+                                stop_loss_price=signal.stop_price,
+                                take_profit_price=signal.target_price,
+                                strategy=strategy.name,
+                                reason=signal.reason,
+                                opened_at=opened_at_dt,
+                                extra={
+                                    "equity_at_entry": round(equity, 4),
+                                    "risk_pct": risk_pct,
+                                    "signal_details": signal.details,
+                                },
+                            )
+                        )
                 logger.info(
                     "order_filled",
                     instrument=instrument,
                     units=units,
                     entry=signal.entry_price,
+                    fill_price=fill_price,
                     stop=signal.stop_price,
                     target=signal.target_price,
                     reason=signal.reason,
@@ -247,12 +296,16 @@ class AccountWorker:
                     instrument=instrument,
                     side=signal.type.value,
                     units=units,
-                    entry=signal.entry_price,
+                    entry=fill_price,
                     stop=signal.stop_price,
                     target=signal.target_price,
                     reason=signal.reason,
                     equity=equity,
                     risk_pct=risk_pct,
+                    trade_id=trade_id or None,
+                    strategy=strategy.name,
+                    opened_at=opened_at_dt.isoformat(),
+                    indicators=_indicator_summary(signal.details),
                 )
             except Exception:
                 logger.exception("order_failed", instrument=instrument, units=units)
@@ -260,29 +313,87 @@ class AccountWorker:
     async def _apply_time_exits(
         self,
         client: OandaClient,
-        strategy,
-        open_by_instrument: dict[str, dict],
+        notifier: TelegramNotifier,
         tracked: dict[str, _TradeMeta],
+        open_by_instrument: dict[str, dict],
         logger: structlog.stdlib.BoundLogger,
     ) -> None:
-        time_exit = self.cfg.strategy.params.time_exit_bars
+        time_exit = getattr(self.cfg.strategy.params, "time_exit_bars", 0) or 0
         if time_exit <= 0:
             return
         bar_seconds = _granularity_seconds(self.cfg.granularity)
         now = datetime.now(timezone.utc)
-        for instrument, trade in list(open_by_instrument.items()):
-            meta = tracked.get(instrument)
-            if not meta:
-                continue
+        for instrument, meta in list(tracked.items()):
             held_bars = int((now - meta.opened_at).total_seconds() // max(bar_seconds, 1))
             if held_bars >= time_exit:
                 try:
                     await client.close_trade(meta.trade_id)
-                    logger.info("time_exit", instrument=instrument, bars_held=held_bars)
+                    logger.info(
+                        "time_exit",
+                        instrument=instrument,
+                        bars_held=held_bars,
+                        trade_id=meta.trade_id,
+                    )
+                    if self.registry is not None:
+                        self.registry.mark_closed(
+                            trade_id=meta.trade_id,
+                            exit_price=None,
+                            realized_pl=None,
+                            close_reason="time_exit",
+                        )
+                    await notifier.notify_trade_closed(
+                        account=self.cfg.name,
+                        instrument=instrument,
+                        trade_id=meta.trade_id,
+                        exit_price=None,
+                        realized_pl=None,
+                        close_reason="time_exit",
+                    )
                     tracked.pop(instrument, None)
                     open_by_instrument.pop(instrument, None)
                 except Exception:
                     logger.exception("time_exit_failed", instrument=instrument)
+
+    async def _reconcile_close(
+        self,
+        client: OandaClient,
+        notifier: TelegramNotifier,
+        logger: structlog.stdlib.BoundLogger,
+        meta: _TradeMeta,
+        reason: str,
+    ) -> None:
+        exit_price: float | None = None
+        realized_pl: float | None = None
+        try:
+            info = await client.get_trade(meta.trade_id)
+            exit_price = _safe_float(info.get("averageClosePrice") or info.get("price"))
+            realized_pl = _safe_float(info.get("realizedPL"))
+        except Exception:
+            logger.warning("close_reconcile_failed", trade_id=meta.trade_id)
+
+        if self.registry is not None:
+            self.registry.mark_closed(
+                trade_id=meta.trade_id,
+                exit_price=exit_price,
+                realized_pl=realized_pl,
+                close_reason=reason,
+            )
+        await notifier.notify_trade_closed(
+            account=self.cfg.name,
+            instrument=meta.instrument,
+            trade_id=meta.trade_id,
+            exit_price=exit_price,
+            realized_pl=realized_pl,
+            close_reason=reason,
+        )
+        logger.info(
+            "trade_closed",
+            instrument=meta.instrument,
+            trade_id=meta.trade_id,
+            exit_price=exit_price,
+            realized_pl=realized_pl,
+            close_reason=reason,
+        )
 
 
 _GRANULARITY_SECONDS = {
@@ -294,4 +405,20 @@ _GRANULARITY_SECONDS = {
 
 
 def _granularity_seconds(g: str) -> int:
-    return _GRANULARITY_SECONDS.get(g, 900)
+    return _GRANULARITY_SECONDS.get(g, 60)
+
+
+def _safe_float(v: Any) -> float | None:
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+_INDICATOR_KEYS = ("fotsi", "trend", "momentum", "strength", "atr", "atr_pct")
+
+
+def _indicator_summary(details: dict) -> dict:
+    return {k: details[k] for k in _INDICATOR_KEYS if k in details}

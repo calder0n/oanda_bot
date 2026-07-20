@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 
 from .account_worker import AccountWorker
 from .config import load_config
+from .persistence import TradeRegistry
 from .utils.logger import configure_logging, get_logger
 
 
@@ -24,8 +25,14 @@ async def _main() -> int:
         log.error("config_load_failed", error=str(exc))
         return 2
 
-    workers = [AccountWorker(cfg=a) for a in cfg.accounts]
-    log.info("starting", accounts=[a.name for a in cfg.accounts])
+    registry_path = os.environ.get("TRADE_DB_PATH", "state/trades.sqlite3")
+    registry = TradeRegistry(registry_path)
+    workers = [AccountWorker(cfg=a, registry=registry) for a in cfg.accounts]
+    log.info(
+        "starting",
+        accounts=[a.name for a in cfg.accounts],
+        trade_db=str(registry.path),
+    )
 
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
